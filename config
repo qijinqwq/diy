@@ -1,0 +1,141 @@
+#nginx.conf
+server {
+    listen 80;
+    server_name 114.132.47.29;
+    return 302 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name 114.132.47.29;
+
+    ssl_certificate /etc/nginx/ssl/fullchain.pem;
+    ssl_certificate_key /etc/nginx/ssl/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # Authelia 认证检查端点
+    location /authelia {
+        internal;
+        proxy_pass http://127.0.0.1:9091/api/verify;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        
+        proxy_set_header X-Original-URL $scheme://$http_host$request_uri;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Forwarded-Uri $request_uri;
+        
+        # 关键：传递 Cookie
+        proxy_set_header Cookie $http_cookie;
+        
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_buffers 4 32k;
+        client_body_buffer_size 128k;
+        proxy_read_timeout 240;
+        proxy_send_timeout 240;
+        proxy_connect_timeout 10;
+    }
+
+    # Authelia 登录界面
+    location / {
+        proxy_pass http://127.0.0.1:9091;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # 关键：确保 Cookie 能设置
+        proxy_cookie_path / /;
+        proxy_cookie_domain localhost 114.132.47.29;
+        
+        proxy_http_version 1.1;
+    }
+
+    # /chat 无斜杠 → 有斜杠
+    location = /chat {
+        return 302 /chat/;
+    }
+
+    # 受保护的后端
+    location /chat/ {
+        auth_request /authelia;
+        error_page 401 =302 https://$host/?rd=$request_uri;
+        
+        proxy_pass http://127.0.0.1:8080/;
+        
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # 关键：传递 Cookie 到后端
+        proxy_set_header Cookie $http_cookie;
+        
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        
+        auth_request_set $user $upstream_http_remote_user;
+        proxy_set_header X-Forwarded-User $user;
+        
+        proxy_redirect / /chat/;
+    }
+}
+
+############
+#authelia.conf
+server:
+  host: 0.0.0.0
+  port: 9091
+
+log:
+  level: debug
+
+theme: light
+
+jwt_secret: "cd2a9a3aca0a3d49abccbcd5d6b1e8f48adb39b81a19b94beafddcd21c63a112"
+
+default_redirection_url: https://114.132.47.29/chat/
+
+authentication_backend:
+  file:
+    path: /etc/authelia/users.yml
+
+access_control:
+  default_policy: deny
+  rules:
+    # 登录页和 Authelia 自身 API 放行
+    - domain: "114.132.47.29"
+      policy: bypass
+      resources:
+        - "^/api/.*$"
+        - "^/static/.*$"
+        - "^/favicon.ico$"
+        - "^/$"
+        - "^/2fa/.*$"
+        - "^/logout$"
+    
+    # 所有 /chat 路径需要认证
+    - domain: "114.132.47.29"
+      policy: one_factor
+      resources:
+        - "^/chat.*$"
+
+# 旧版本格式：简单的 session 配置
+session:
+  name: authelia_session
+  secret: "2e7c76582ca6430f8d6b3717dc7a691751e800a2eb83efe46c3b04b3de7505"
+  expiration: 1h
+  inactivity: 5m
+  domain: "114.132.47.29"
+
+storage:
+  encryption_key: "50db09079e2ebcf044b440a2ea6ef10c4430028a846b6ad592c10574859c86f7"
+  local:
+    path: /var/lib/authelia/authelia.db
+
+notifier:
+  filesystem:
+    filename: /etc/authelia/notification.txt
